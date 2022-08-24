@@ -1,353 +1,65 @@
 "use strict";
 
-var CryptoJS = require("crypto-js");
 const TronWeb = require("tronweb");
+const { ethers } = require("ethers");
 const { Decimal } = require("decimal.js");
-const fs = require("fs");
-const Tx = require("ethereumjs-tx");
+
+const AbiCoder = ethers.utils.AbiCoder;
+const ADDRESS_PREFIX = "41";
 
 module.exports = {
   /**
-   * 获取eth 余额
-   * @param {string} address
+   * 生成以太坊钱包
    * @returns
-   * @memberof EthModel
    */
-  async getEthAmount(address) {
-    const web3 = this.ctx.getWeb3();
-    const amount = await web3.eth.getBalance(address);
-    return web3.utils.fromWei(amount, "ether");
+  createEtherWallet() {
+    const privateKey = ethers.utils.randomBytes(32);
+    const wallet = new ethers.Wallet(privateKey);
+    const key = ethers.BigNumber.from(privateKey)._hex;
+    const encKey = this.app.aesEcbEncrypt(key);
+    return { address: wallet.address, key: encKey };
   },
 
   /**
-   * 获取转移所需手续费
-   * @param {string} from
-   * @param {string} to
-   * @param {(number| string)} value
+   * 生成波场钱包
    * @returns
-   * @memberof EthModel
    */
-  async calcEthGas(from, to, value) {
-    const web3 = this.ctx.getWeb3();
-    const gasPrice = await this.getGasPrice();
-    const gasLimit = await web3.eth.estimateGas({
-      gasPrice,
-      value: web3.utils.toWei(value.toString(), "ether"),
-    });
-
-    return {
-      gasLimit,
-      gasPrice,
-      gasToEth: web3.utils.fromWei(
-        new Decimal(gasPrice).mul(gasLimit).toFixed()
-      ),
-    };
+  async createTronWallet() {
+    const info = await TronWeb.createAccount();
+    const encKey = this.app.aesEcbEncrypt(info.privateKey);
+    return { address: info.address.base58, key: encKey };
   },
 
   /**
-   * 获取tron转移所需手续费
-   * @param {string} from
-   * @param {string} to
-   * @param {(number| string)} value
+   * 币入库放大 1000000倍
+   * @param {*} value
    * @returns
-   * @memberof EthModel
    */
-  async calcTronGas(contract, from, to, amount) {
-    const tronWeb = this.ctx.getTronWeb();
-    const parameter1 = [
-      { type: "address", value: from },
-      { type: "uint256", value: amount },
-    ];
-    const transaction =
-      await tronWeb.transactionBuilder.triggerConstantContract(
-        contract,
-        "transfer(address,uint256)",
-        {},
-        parameter1,
-        to
-      );
-    return transaction.energy_used;
-  },
-
-  /**
-   * 计算最多可发送eth数量
-   * @param {string} from
-   * @param {string} to
-   * @returns
-   * @memberof EthModel
-   */
-  async calcMaxSendEthAmount(from, to) {
-    const gasObj = await this.calcEthGas(from, to, 0);
-    const ethAmount = await this.getEthAmount(from);
-    return new Decimal(ethAmount).mul(gasObj.gasToEth).toString();
-  },
-
-  /**
-   * 合约初始化
-   * @memberof TokenModel
-   */
-  contractInit(address, name = "token") {
-    const { ctx } = this;
-    const web3 = ctx.getWeb3();
-    const abi = this.buildAbi();
-    return new web3.eth.Contract(abi[name], address);
-  },
-
-  /**
-   * 获取代币余额
-   * @param {string} address
-   * @returns
-   * @memberof TokenModel
-   */
-  async getTokenAmount(contractInstance, address, decimal = 18) {
-    const tokenAmount = await contractInstance.methods
-      .balanceOf(address)
-      .call();
-    return new Decimal(tokenAmount).div(10 ** decimal).toString();
-  },
-
-  /**
-   * 构建转账参数
-   * @param {string} to
-   * @param {(string|number)} tokenAmount
-   * @returns
-   * @memberof TokenModel
-   */
-  async buildTransactionAbiData(
-    contractInstance,
-    to,
-    tokenAmount,
-    decimal = 18
-  ) {
-    tokenAmount = new Decimal(tokenAmount).mul(10 ** decimal).toString();
-    const abiData = await contractInstance.methods
-      .transfer(to, tokenAmount)
-      .encodeABI();
-    return abiData;
-  },
-
-  /**
-   * 计算发送代币所需的eth
-   * @param {string} from
-   * @param {string} to
-   * @param {(string|number)} tokenAmount
-   * @returns
-   * @memberof TokenModel
-   */
-  async calcTokenGas(contractInstance, from, to, tokenAmount, decimal = 18) {
-    const web3 = this.ctx.getWeb3();
-    const gasPrice = await this.getGasPrice();
-    tokenAmount = new Decimal(tokenAmount).mul(10 ** decimal).toString();
-    const gasLimit = await contractInstance.methods
-      .transfer(to, tokenAmount)
-      .estimateGas({
-        from: this.app.config.contractCalcGasAddress,
-      });
-    return {
-      gasPrice,
-      gasLimit,
-      gasToEth: web3.utils.fromWei(
-        new Decimal(gasPrice).mul(gasLimit).toFixed(),
-        "ether"
-      ),
-    };
-  },
-
-  /**
-   * 构建代币转移TxObj
-   * @param {string} contractAddress
-   * @param {string} from
-   * @param {string} to
-   * @param {(string| number)} [amount='all']
-   * @returns
-   * @memberof TransactionModel
-   */
-  async buildTokenTransaction(contractAddress, from, to, amount = 0) {
-    let data;
-    const contractInstance = this.contractInit(contractAddress);
-    if (amount == 0) {
-      //默认发送全部币
-      amount = await this.getTokenAmount(contractInstance, from);
-      data = await this.buildTransactionAbiData(contractInstance, to, amount);
-    } else {
-      const web3 = this.ctx.getWeb3();
-      let balance = await contractInstance.methods.balanceOf(from);
-      balance = web3.utils.fromWei(balance, "ether");
-      if (balance < amount) {
-        throw new Error("余额不足");
-      }
-      data = await this.buildTransactionAbiData(contractInstance, to, amount);
-    }
-    const gasObj = await this.calcTokenGas(contractInstance, from, to, amount);
-    const nonce = await this.getAddressNonce(from);
-
-    return {
-      from,
-      to: contractAddress,
-      nonce,
-      gasPrice: gasObj.gasPrice,
-      gasLimit: gasObj.gasLimit,
-      data,
-    };
-  },
-
-  gasEth(gasPrice, gasLimit) {
-    const web3 = this.ctx.getWeb3();
-    return web3.utils.fromWei(
-      new Decimal(gasPrice).mul(gasLimit).toFixed(),
-      "ether"
-    );
-  },
-
-  /**
-   * 构建Eth 转移
-   * @param {string} from
-   * @param {string} to
-   * @param {(string|number)} [amount]
-   * @memberof TransactionModel
-   */
-  async buildEthTransaction(from, to, amount = 0) {
-    const web3 = this.ctx.getWeb3();
-    let gasObj = {};
-
-    if (amount === 0) {
-      amount = await this.getEthAmount(from);
-      gasObj = await this.calcEthGas(from, to, amount);
-      amount = new Decimal(amount).sub(gasObj.gasToEth).toString();
-    } else {
-      gasObj = await this.calcEthGas(from, to, amount);
-    }
-
-    return {
-      from,
-      to,
-      gasPrice: gasObj.gasPrice,
-      gasLimit: gasObj.gasLimit,
-      value: web3.utils.toWei(amount.toString(), "ether"),
-    };
-  },
-
-  /**
-   * 签名交易
-   * @param {object} transaction
-   * @param {string} privateKey
-   * @returns
-   * @memberof TransactionModel
-   */
-  signTransaction(transaction, privateKey) {
-    const web3 = this.ctx.getWeb3();
-    Object.keys(transaction).map((key) => {
-      if (["to", "data"].includes(key) === false) {
-        transaction[key] = web3.utils.toHex(transaction[key]);
-      }
-    });
-    const bufferKey = Buffer.from(privateKey.replace("0x", ""), "hex");
-    const tx = new Tx(transaction);
-    tx.sign(bufferKey);
-    const serializedTx = tx.serialize();
-    return `0x${serializedTx.toString("hex")}`;
-  },
-
-  /**
-   * 发送交易
-   * @param {string} Tx
-   * @returns
-   * @memberof TransactionModel
-   */
-  sendTransaction(Tx) {
-    const web3 = this.ctx.getWeb3();
-    return web3.eth.sendSignedTransaction(Tx);
-  },
-
-  async getGasPrice(amount = 0) {
-    const web3 = this.ctx.getWeb3();
-    if (amount > 0) {
-      return web3.utils.toWei(amount.toString(), "gwei");
-    }
-    if (!isNaN(parseInt(this.app.config.gasPrice))) {
-      return web3.utils.toWei(this.app.config.gasPrice, "gwei");
-    } else {
-      return await web3.eth.getGasPrice();
-    }
-  },
-
-  checkAddress(address) {
-    const web3 = this.ctx.getWeb3();
-    address = web3.utils.toChecksumAddress(address);
-    web3.utils.checkAddressChecksum(address);
-    return address;
-  },
-
-  sleep(ms) {
-    return new Promise((resolve) => setTimeout(resolve, ms));
-  },
-
-  buildAbi() {
-    try {
-      const abi = fs.readFileSync(this.ctx.app.config.contractPath, "utf8");
-      return JSON.parse(abi);
-    } catch (err) {
-      ctx.logger.error("buildAbi err:%s", e);
-    }
-  },
-
-  async getAddressNonce(address) {
-    const web3 = this.ctx.getWeb3();
-    return await web3.eth.getTransactionCount(address);
-  },
-
-  async getChainId() {
-    const web3 = this.ctx.getWeb3();
-    return await web3.eth.getChainId();
-  },
-
-  /**
-   * AES-256-ECB对称加密
-   * @param text {string} 要加密的明文
-   * @param secretKey {string} 密钥，43位随机大小写与数字
-   * @returns {string} 加密后的密文，Base64格式
-   */
-  aesEcbEncrypt(text) {
-    var keyHex = CryptoJS.enc.Base64.parse("");
-    var messageHex = CryptoJS.enc.Utf8.parse(text);
-    var encrypted = CryptoJS.AES.encrypt(messageHex, keyHex, {
-      mode: CryptoJS.mode.ECB,
-      padding: CryptoJS.pad.Pkcs7,
-    });
-    return encrypted.toString();
-  },
-
-  /**
-   * AES-256-ECB对称解密
-   * @param textBase64 {string} 要解密的密文，Base64格式
-   * @param secretKey {string} 密钥，43位随机大小写与数字
-   * @returns {string} 解密后的明文
-   */
-  aesEcbDecrypt(textBase64) {
-    var keyHex = CryptoJS.enc.Base64.parse("");
-    var decrypt = CryptoJS.AES.decrypt(textBase64, keyHex, {
-      mode: CryptoJS.mode.ECB,
-      padding: CryptoJS.pad.Pkcs7,
-    });
-    return CryptoJS.enc.Utf8.stringify(decrypt);
-  },
-
-  //币入库放大 1000000倍
   coinToDB(value) {
     return parseInt(value * 1000000, 10);
   },
 
-  //币出库缩小 1000000倍
+  /**
+   * 币出库缩小 1000000倍
+   * @param {*} value
+   * @returns
+   */
   coinGetDB(value) {
     return parseFloat(value / 1000000);
   },
 
-  async getSourceTransactionList(url, params) {
+  /**
+   * 通过api获取 以太坊 交易
+   * @param {*} url
+   * @param {*} params
+   * @returns
+   */
+  async getEthTransactionList(url, params) {
     const queryString = this.paresQuery(params);
     try {
       const res = await this.ctx.curl(url + queryString, {
         dataType: "json",
-        timeout: 3000,
+        timeout: 5000,
       });
       if (res.status != 200) {
         return [];
@@ -355,42 +67,22 @@ module.exports = {
       if (res.data.status != 1) {
         return [];
       }
-      return res.data.result;
+      let list = [];
+      for (const transaction of res.data.result) {
+        list.push(this.handleEthTransaction(transaction));
+      }
+      return list;
     } catch (err) {
       this.logger.error(err);
       return [];
     }
   },
 
-  async getTransactionList(url, params) {
-    const queryString = this.paresQuery(params);
-    try {
-      const res = await this.ctx.curl(url + queryString, {
-        dataType: "json",
-        timeout: 3000,
-      });
-      let list = {};
-      let lastBlock = 0;
-      if (res.status != 200) {
-        return { list, lastBlock };
-      }
-      if (res.data.status != 1) {
-        return { list, lastBlock };
-      }
-      for (const transaction of res.data.result) {
-        list[transaction.to.toLowerCase()] =
-          this.handleTransaction(transaction);
-        if (transaction.blockNumber > lastBlock) {
-          lastBlock = transaction.blockNumber;
-        }
-      }
-      return { list, lastBlock };
-    } catch (err) {
-      this.logger.error(err);
-      return { list: [], lastBlock: 0 };
-    }
-  },
-
+  /**
+   * 获取波场链交易
+   * @param {*} url
+   * @returns
+   */
   async getTronTransactionList(url) {
     const { ctx } = this;
     try {
@@ -398,7 +90,7 @@ module.exports = {
         // 自动解析 JSON response
         dataType: "json",
         // 3 秒超时
-        timeout: 3000,
+        timeout: 5000,
         headers: {
           "TRON-PRO-API-KEY": ctx.app.config.tron.apiKey,
           "Content-Type": "application/json",
@@ -415,39 +107,57 @@ module.exports = {
       for (const transaction of res.data.data) {
         const trans = this.handleTronTransaction(transaction);
         if (!trans) continue;
-        list[trans.to.toLowerCase()] = trans;
+        if (!list[trans.to]) {
+          list[trans.to] = [trans];
+        } else {
+          list[trans.to].push(trans);
+        }
         if (trans.block_timestamp > lastBlock) {
-          lastBlock = transaction.block_timestamp;
+          lastBlock = trans.block_timestamp;
         }
       }
       const next = res.data.meta.links ? res.data.meta.links.next : "";
       return { list, next, lastBlock };
     } catch (err) {
       this.logger.error(err);
-      return { list: [], next: "", lastBlock: 0 };
+      return { list: {}, next: "", lastBlock: 0 };
     }
   },
 
+  /**
+   * 波场链交易处理
+   * @param {*} transaction
+   * @returns
+   */
   handleTronTransaction(transaction) {
-    const { ctx } = this;
+    if (transaction.ret[0].contractRet != "SUCCESS") {
+      return false;
+    }
     let data = transaction.raw_data.contract[0].parameter.value.data;
     if (!data) {
       return false;
     }
     //特殊处理，不然报错，41 => 0x
     data = data.replace("0000041", "0000000");
-    const dataArr = ctx.decodeTronParams(["address", "uint256"], data, true);
+    const dataArr = this.decodeTronParams(["address", "uint256"], data, true);
     return {
       txid: transaction.txID,
       block_timestamp: transaction.block_timestamp,
       block_number: transaction.blockNumber,
-      from: transaction.raw_data.contract[0].parameter.value.owner_address,
+      from: TronWeb.address.fromHex(
+        transaction.raw_data.contract[0].parameter.value.owner_address
+      ),
       to: TronWeb.address.fromHex(dataArr[0]),
       value: dataArr[1].toString(),
     };
   },
 
-  handleTransaction(transaction) {
+  /**
+   * 以太坊交易处理
+   * @param {*} transaction
+   * @returns
+   */
+  handleEthTransaction(transaction) {
     transaction["gasToEth"] = new Decimal(transaction.gas)
       .mul(transaction.gasPrice)
       .div(10 ** 18)
@@ -472,25 +182,29 @@ module.exports = {
     return queryString;
   },
 
-  getGasTronKey() {
-    return "";
-  },
+  //types:参数类型列表，如果函数有多个返回值，列表中类型的顺序应该符合定义的顺序
+  //output: 解码前的数据
+  //ignoreMethodHash：对函数返回值解码，ignoreMethodHash填写false，如果是对gettransactionbyid结果中的data字段解码时，ignoreMethodHash填写true
+  decodeTronParams(types, output, ignoreMethodHash) {
+    if (!output || typeof output === "boolean") {
+      ignoreMethodHash = output;
+      output = types;
+    }
 
-  getGasEthKey() {
-    return "";
-  },
+    if (ignoreMethodHash && output.replace(/^0x/, "").length % 64 === 8)
+      output = "0x" + output.replace(/^0x/, "").substring(8);
 
-  async getTokenRate() {
-    const { ctx } = this;
-    const router = this.contractInit(ctx.app.config.pancakeRouter, "pancake");
+    const abiCoder = new AbiCoder();
 
-    const web3 = ctx.getWeb3();
-    const uint = web3.utils.toWei("1", "ether");
-    const path = [
-      ctx.app.config.bsc.tokens.aha.address,
-      ctx.app.config.bsc.tokens.usdt.address,
-    ];
-    const amount = await router.methods.getAmountsOut(uint, path).call();
-    return web3.utils.fromWei(amount[1], "ether");
+    if (output.replace(/^0x/, "").length % 64)
+      throw new Error(
+        "The encoded string is not valid. Its length must be a multiple of 64."
+      );
+    return abiCoder.decode(types, output).reduce((obj, arg, index) => {
+      if (types[index] == "address")
+        arg = ADDRESS_PREFIX + arg.substr(2).toLowerCase();
+      obj.push(arg);
+      return obj;
+    }, []);
   },
 };
