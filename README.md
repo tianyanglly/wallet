@@ -32,4 +32,27 @@ $ npm stop
 
 [egg]: https://eggjs.org
 
-https://antcave.club/
+- Rinkeby faucet 測試幣領取 - 
+1. https://faucets.chain.link/rinkeby
+2. https://fauceth.komputing.org/
+3. https://faucet.rinkeby.io/
+
+- ETH 線上編輯器 -
+https://remix.ethereum.org/
+
+- Nic Meta 智能合約範例 -
+https://github.com/niclin/nic_meta/bl...
+
+- ETH 轉 Gwei -
+https://eth-converter.com/
+
+- OpenSea 測試網路 - 
+https://testnets.opensea.io/
+
+- HashLips 組圖專案 -
+https://github.com/HashLips/hashlips_...
+
+- IPFS 上傳空間 -
+https://www.pinata.cloud/
+
+https://app.pinata.cloud/
